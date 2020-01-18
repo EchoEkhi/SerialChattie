@@ -7,13 +7,13 @@ LCD5110 myGLCD(8, 9, 10, 11, 12); // backlight is at 13
 SoftwareSerial wireless(4, 5);    // RX, TX // 6 is AT settings pin
 Encoder Enc(2, 3);
 
-unsigned long int encoffset, backlighttimer, shutdowntimer;
+unsigned long int encoffset, backlighttimer, shutdowntimer = 0;
 extern uint8_t SmallFont[], MediumNumbers[];
 String type;
 String message[3];
-String options[6];
 String devices[3];
-bool blinkpowerstate, backlight, shutdown;
+String options[6];
+bool blinkpowerstate, backlight;
 int uioffset, onlinedevicescount;
 class Comms
 // This class requires a software serial connection called "wireless" to be declared
@@ -383,7 +383,7 @@ void commandtree(String command)
         else if (comms.pharse(command, 2) == "online")
         {
             // check if device is already in registry
-            for (int i = 0; i < 6; i++)
+            for (int i = 0; i < 3; i++)
             {
                 if (comms.pharse(command, 0) == devices[i])
                 {
@@ -409,24 +409,28 @@ void commandtree(String command)
         else if (comms.pharse(command, 2) == "set")
         // <source> <target> set <index> "<content>" // set the options array
         {
-            options[interize(comms.pharse(command, 3))] = comms.pharse(command, 4);
+            int optnum = comms.pharse(command, 3).toInt();
+            options[optnum] = comms.pharse(command, 4);
             return;
         }
         else if (comms.pharse(command, 2) == "menu")
         // <source> <target> menu <optcount> "<title>" // trigger a menu and send the response
         {
-            int choice = menu(interize(comms.pharse(command, 3)), comms.pharse(command, 4), options);
+            // reset backlight status
+            digitalWrite(13, backlight);
+            int optnum = comms.pharse(command, 3).toInt();
+            String title = comms.pharse(command, 4);
+            int choice = menu(optnum, title, options);
             // <source> <target> respond <value>
             comms.send(comms.pharse(command, 0), "respond " + String(choice));
             return;
         }
         else if (comms.pharse(command, 2) == "selnum")
-        // <source> <target> selnum "<title>" <mini> <maxi> <defaultint> // trigger a selnum and send the response
+        // <source> <target> selnum // trigger a selnum and send the response
         {
-            int mini = comms.pharse(comms.read(), 4).toInt();
-            int maxi = comms.pharse(comms.read(), 5).toInt();
-            int defaultint = comms.pharse(comms.read(), 6).toInt();
-            int choice = selnum(comms.pharse(comms.read(), 3), mini, maxi, defaultint);
+            // reset backlight status
+            digitalWrite(13, backlight);
+            int choice = selnum(options[0], options[1].toInt(), options[2].toInt(), options[3].toInt());
             // <source> <target> respond <value>
             comms.send(comms.pharse(command, 0), "respond " + String(choice));
             return;
@@ -566,20 +570,11 @@ bool debounce()
 
 void blinkpower()
 {
-    // shutdown check background process, checks if it's time to shutdown
-    if (shutdowntimer != 0)
-    {
-        if (millis() > shutdowntimer)
-        {
-            shutdown = true;
-            scrollmessages(F("shutdown initiated"));
-        }
-    }
-
     // change the state of the power pin to keep the chip awake
-    if (shutdown)
+    if (shutdowntimer != 0 && millis() > shutdowntimer)
     {
         digitalWrite(7, LOW);
+        scrollmessages(F("shutdown initiated"));
     }
     else
     {
@@ -615,7 +610,7 @@ void menutree()
         delay(500);
         myGLCD.print(F("Terminal"), CENTER, 0);
         myGLCD.print(F("Firmware: v0.8"), CENTER, 8);
-        myGLCD.print(F("Serial_chattie"), CENTER, 16);
+        myGLCD.print(F("SerialChattie"), CENTER, 16);
         myGLCD.print(F("Beta Release"), CENTER, 24);
         myGLCD.print(F("Compiled on"), CENTER, 32);
         myGLCD.print(__DATE__, CENTER, 40);
@@ -630,20 +625,35 @@ void menutree()
         break;
     case 3: // get devices list
         // clear all the existing devices
-        for (int i = 0; i < 6; i++)
+        for (int i = 0; i < 3; i++)
         {
             devices[i] = "";
         }
         onlinedevicescount = 0;
-
         comms.announce();
         break;
-    case 4: // launch devices' menu
-        comms.send(devices[menu(onlinedevicescount, "Devices", devices) - 1], "query");
+    case 5: // schedule shutdown. For some reason, it doesn't work when put under case 4
+        if (shutdowntimer == 0)
+        {
+            int shutdowntime = selnum(F("Schedule Shutdown"), 0, 60, -1);
+            if (shutdowntime != -1)
+            {
+                shutdowntimer = 60000 * shutdowntime + millis();
+                scrollmessages(F("Shutdown Scheduled"));
+            }
+        }
+        else
+        {
+            shutdowntimer = 0;
+            scrollmessages(F("Shutdown Cancelled"));
+        }
         break;
-    case 5: // schedule shutdown by disabling blinkpower
-        shutdowntimer = 60000 * selnum(F("Schedule Shutdown"), 0, 60, 0) + millis();
-        scrollmessages(F("Shutdown Scheduled"));
+    case 4: // launch devices' menu
+        int choice = menu(onlinedevicescount, "Devices", devices);
+        if (choice != 0)
+        {
+            comms.send(devices[choice - 1], "query");
+        }
         break;
     }
 }
@@ -804,11 +814,7 @@ void textbox(String title, String text1)
         type.remove(type.length() - 1);
         break;
     case 39:
-        for (int i = 5; i > 0; i--)
-        {
-            message[i] = message[i - 1];
-        }
-        message[0] = type;
+        scrollmessages(type);
         type = "";
         break;
     default:
@@ -852,7 +858,7 @@ int selnum(String title, int mini, int maxi, int defaultint)
             myGLCD.setFont(MediumNumbers);
             myGLCD.print(String(Enc.read() - 1 - encoffset + mini), CENTER, 15);
             myGLCD.setFont(SmallFont);
-            myGLCD.print(title, CENTER, 1);
+            displayscroll(title, CENTER, 1);
         }
         myGLCD.drawLine(0, 9, 84, 9); //UI
         myGLCD.update();
